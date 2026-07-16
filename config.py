@@ -23,10 +23,14 @@ CRYPTO_PAY_TOKEN = os.getenv("CRYPTO_PAY_TOKEN")
 CRYPTO_ASSET = os.getenv("CRYPTO_ASSET", "USDT")
 
 # Platega Payment Gateway
+# Авторизация у Platega — через заголовки X-MerchantId / X-Secret (не подпись в теле!)
 PLATEGA_ENABLED = os.getenv("PLATEGA_ENABLED", "false").lower() == "true"
 PLATEGA_BASE_URL = os.getenv("PLATEGA_BASE_URL", "https://app.platega.io")
-PLATEGA_SHOP_ID = os.getenv("PLATEGA_SHOP_ID", "")
+PLATEGA_API_VERSION = os.getenv("PLATEGA_API_VERSION", "v2")  # v1 -> /transaction/process ("redirect"), v2 -> /v2/transaction/process ("url")
+PLATEGA_MERCHANT_ID = os.getenv("PLATEGA_MERCHANT_ID", "")
 PLATEGA_SECRET = os.getenv("PLATEGA_SECRET", "")
+PLATEGA_RETURN_URL = os.getenv("PLATEGA_RETURN_URL", "https://t.me/cerberusVPN_robot")
+PLATEGA_FAILED_URL = os.getenv("PLATEGA_FAILED_URL", "https://t.me/cerberusVPN_robot")
 
 # VPN
 VPN_DOMAIN = os.getenv("VPN_DOMAIN", "cerberusvless.top")

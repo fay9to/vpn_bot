@@ -82,24 +82,31 @@ async def platega_webhook(request: Request):
 
         from platega_client import platega
 
-        received_signature = body.get("signature", "")
+        # Platega шлёт health-check пинг пустым телом без заголовков авторизации —
+        # на него нужно ответить 200 OK, не отклоняя как неавторизованный запрос.
+        merchant_header = request.headers.get("X-MerchantId", "")
+        secret_header = request.headers.get("X-Secret", "")
+        if not merchant_header and not secret_header and not body:
+            logger.info("ℹ️ Platega webhook verification ping")
+            return JSONResponse({"status": "ok"})
 
-        # Проверяем подпись
-        if not platega.verify_webhook_signature(body, received_signature):
-            logger.warning("⚠️ Webhook отклонен: неверная подпись")
-            # Возвращаем 401, чтобы Platega знал, что мы его не приняли
-            return JSONResponse({"status": "error", "message": "Invalid signature"}, status_code=401)
+        # Проверяем авторизацию по заголовкам X-MerchantId / X-Secret
+        if not platega.verify_webhook_auth(request.headers):
+            logger.warning("⚠️ Webhook отклонен: неверные X-MerchantId/X-Secret")
+            return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
 
-        order_id = str(body.get("orderId") or body.get("order_id"))
+        # order_id мы передавали в поле "payload" при создании платежа
+        order_id = str(body.get("payload") or body.get("orderId") or body.get("order_id") or "")
         status = str(body.get("status", "")).upper()
-        amount = float(body.get("amount", 0))
+        payment_details = body.get("paymentDetails") or {}
+        amount = float(payment_details.get("amount") or body.get("amount") or 0)
 
         logger.info(f"💰 Обработка Platega: Order={order_id}, Status={status}, Amount={amount}")
 
         # Нас интересует только успешная оплата
-        if status not in ["CONFIRMED", "SUCCESS", "COMPLETED", "PAID"]:
+        if status not in ["CONFIRMED"]:
             logger.info(f"ℹ️ Игнорируем статус: {status}")
-            return JSONResponse({"status": "ok"})  # Важно вернуть 200 OK, чтобы Platega не спамил重试
+            return JSONResponse({"status": "ok"})  # Важно вернуть 200 OK, чтобы Platega не спамила повторами
 
         # Ищем платеж в БД
         payment_info = await db.get_pending_payment(order_id)

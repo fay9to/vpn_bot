@@ -300,7 +300,6 @@ async def pay_platega(callback: types.CallbackQuery, state: FSMContext):
         order_id=order_id,
         amount=price_rub,
         description=f"Cerberus VPN - {devices} устр. на {period} дн.",
-        email=""
     )
 
     if not result or not result.get("success"):
@@ -338,14 +337,17 @@ async def pay_platega(callback: types.CallbackQuery, state: FSMContext):
 async def check_platega_payment(callback: types.CallbackQuery, state: FSMContext):
     """Ручная проверка оплаты Platega (на случай если вебхук задерживается)"""
     from platega_client import platega
-    from panel_client import XUIPanelClient
 
     order_id = callback.data.replace("check_platega_", "")
 
-    # В идеале здесь должен быть запрос к API Platega для проверки статуса заказа
-    # Но для простоты пока оставим заглушку или базовую проверку,
-    # так как основная выдача идёт через вебхук.
+    payment_info = await db.get_pending_payment(order_id)
+    if not payment_info:
+        # Платежа уже нет в pending — значит вебхук его обработал и выдал подписку
+        await callback.answer("✅ Оплата уже подтверждена, подписка выдана!", show_alert=True)
+        return
 
+    # У нас в БД нет сохранённого transaction_id Platega, поэтому просто сообщаем,
+    # что ждём вебхук — сама выдача подписки происходит в webhook_server.py
     await callback.answer(
         "⏳ Ожидаем подтверждение от платёжной системы. Обычно это занимает 5-15 секунд. Если оплата прошла, подписка придёт автоматически!",
         show_alert=True)
