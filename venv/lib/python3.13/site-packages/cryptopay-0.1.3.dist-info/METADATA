@@ -1,0 +1,41 @@
+Metadata-Version: 2.1
+Name: cryptopay
+Version: 0.1.3
+Summary: Crypto.com pay module
+Home-page: https://github.com/Pipoline/cryptopay
+Author: Peter Gonda
+Author-email: peter@pipoline.com
+License: MIT
+Platform: UNKNOWN
+Classifier: Programming Language :: Python :: 3
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Natural Language :: English
+Classifier: Topic :: Utilities
+Classifier: Programming Language :: Python
+Classifier: Programming Language :: Python :: 3
+Classifier: Operating System :: OS Independent
+Description-Content-Type: text/markdown
+License-File: LICENSE
+
+# cryptopay
+Python API wrapper for [Crypto.com Pay Checkout](https://pay-docs.crypto.com)
+
+![Travis (.com)](https://img.shields.io/travis/com/pipoline/cryptopay) ![Codecov](https://img.shields.io/codecov/c/github/pipoline/cryptopay) ![PyPI - Downloads](https://img.shields.io/pypi/dm/cryptopay) ![PyPI](https://img.shields.io/pypi/v/cryptopay)
+### Installation
+- From pypi:
+`pip3 install cryptopay`
+- From GitHub:
+Clone our repository and `python3 setup.py install`
+
+### Usage
+```python
+from pprint import pprint
+from cryptopay import Client
+
+client = Client()
+response = client.get_payments()
+payments = response.json()
+pprint(payments)
+```
+
+
