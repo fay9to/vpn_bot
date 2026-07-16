@@ -1,0 +1,12 @@
+aiogram
+aiohttp
+python-dotenv
+aiosqlite
+cryptopay
+requests
+httpx
+qrcode[pil]
+Pillow
+fastapi
+uvicorn
+python-multipart
