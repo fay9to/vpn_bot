@@ -1,0 +1,9 @@
+.env
+*.db
+*.log
+__pycache__/
+venv/
+*.key
+*.pem
+*.jpg
+.DS_Store
