@@ -47,12 +47,7 @@ async def cryptobot_webhook(request: Request):
         devices = payment_info["devices"]
         tariff_days = payment_info["tariff_days"]
 
-        tariff = next((t for t in config.TARIFFS if t.days == tariff_days), None)
-        if not tariff:
-            logger.error(f"❌ Tariff {tariff_days} not found")
-            return JSONResponse({"status": "error"}, status_code=500)
-
-        await issue_subscription(user_id, devices, tariff, amount, asset)
+        await issue_subscription(user_id, devices, tariff_days, amount, asset)
         await db.delete_pending_payment(invoice_id)
 
         return JSONResponse({"status": "ok"})
@@ -95,42 +90,41 @@ async def platega_webhook(request: Request):
             logger.warning("⚠️ Webhook отклонен: неверные X-MerchantId/X-Secret")
             return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
 
-        # order_id мы передавали в поле "payload" при создании платежа
-        order_id = str(body.get("payload") or body.get("orderId") or body.get("order_id") or "")
+        # Ключ сопоставления — transactionId ("id" в теле callback), а НЕ payload:
+        # согласно офиц. документации Platega (CallbackPayload), в вебхуке
+        # присутствуют только {id, amount, currency, status, paymentMethod} —
+        # поля payload/orderId там нет.
+        transaction_id = str(body.get("id") or "")
         status = str(body.get("status", "")).upper()
-        payment_details = body.get("paymentDetails") or {}
-        amount = float(payment_details.get("amount") or body.get("amount") or 0)
+        amount = float(body.get("amount") or 0)
 
-        logger.info(f"💰 Обработка Platega: Order={order_id}, Status={status}, Amount={amount}")
+        logger.info(f"💰 Обработка Platega: TransactionId={transaction_id}, Status={status}, Amount={amount}")
 
-        # Нас интересует только успешная оплата
-        if status not in ["CONFIRMED"]:
+        # Нас интересует только успешная оплата. По докам статус может быть
+        # только PENDING / CANCELED / CONFIRMED / CHARGEBACKED.
+        if status != "CONFIRMED":
             logger.info(f"ℹ️ Игнорируем статус: {status}")
             return JSONResponse({"status": "ok"})  # Важно вернуть 200 OK, чтобы Platega не спамила повторами
 
-        # Ищем платеж в БД
-        payment_info = await db.get_pending_payment(order_id)
+        # Ищем платеж в БД по transactionId (мы сохраняли его как invoice_id
+        # в pending_payments сразу после успешного создания платежа)
+        payment_info = await db.get_pending_payment(transaction_id)
 
         if not payment_info:
-            logger.warning(f"⚠️ Заказ {order_id} не найден в pending_payments. Возможно, уже обработан.")
+            logger.warning(f"⚠️ Транзакция {transaction_id} не найдена в pending_payments. Возможно, уже обработана.")
             return JSONResponse({"status": "ok"})  # Возвращаем OK, чтобы Platega перестал стучаться
 
         user_id = payment_info["user_id"]
         devices = payment_info["devices"]
         tariff_days = payment_info["tariff_days"]
 
-        tariff = next((t for t in config.TARIFFS if t.days == tariff_days), None)
-        if not tariff:
-            logger.error(f"❌ Тариф {tariff_days} дней не найден в config.py")
-            return JSONResponse({"status": "error"}, status_code=500)
-
         # Выдаем подписку
         logger.info(f"✅ Выдача подписки для user_id={user_id}, devices={devices}, days={tariff_days}")
-        await issue_subscription(user_id, devices, tariff, amount, "RUB")
+        await issue_subscription(user_id, devices, tariff_days, amount, "RUB")
 
         # Удаляем из pending
-        await db.delete_pending_payment(order_id)
-        logger.info(f"✅ Webhook успешно обработан для заказа {order_id}")
+        await db.delete_pending_payment(transaction_id)
+        logger.info(f"✅ Webhook успешно обработан для транзакции {transaction_id}")
 
         return JSONResponse({"status": "ok", "message": "success"})
 
@@ -146,7 +140,7 @@ async def health():
     return {"status": "ok"}
 
 
-async def issue_subscription(user_id: int, devices: int, tariff, amount: float, currency: str):
+async def issue_subscription(user_id: int, devices: int, tariff_days: int, amount: float, currency: str):
     """Выдача подписки после оплаты"""
     from panel_client import XUIPanelClient
     from aiogram import Bot
@@ -160,7 +154,7 @@ async def issue_subscription(user_id: int, devices: int, tariff, amount: float, 
         return
 
     client_email = f"user_{uuid.uuid4().hex[:10]}"
-    expiry_time = int(time.time() * 1000) + (tariff.days * 24 * 60 * 60 * 1000)
+    expiry_time = int(time.time() * 1000) + (tariff_days * 24 * 60 * 60 * 1000)
 
     success = await panel.add_client_to_all_inbounds(
         email=client_email,
@@ -175,7 +169,7 @@ async def issue_subscription(user_id: int, devices: int, tariff, amount: float, 
     await db.add_subscription(
         user_id=user_id,
         client_email=client_email,
-        tariff_days=tariff.days,
+        tariff_days=tariff_days,
         device_limit=devices,
         expiry_time=expiry_time
     )
@@ -184,6 +178,8 @@ async def issue_subscription(user_id: int, devices: int, tariff, amount: float, 
     sub_link = await panel.get_subscription_link(client_email)
 
     device_text = "♾️ Безлимит" if devices == 0 else f"{devices} устройств"
+    period_title = config.PERIOD_NAMES.get(tariff_days, f"{tariff_days} дн.")
+    period_emoji = config.PERIOD_EMOJIS.get(tariff_days, "📅")
 
     keyboard_buttons = []
     if sub_link:
@@ -202,7 +198,7 @@ async def issue_subscription(user_id: int, devices: int, tariff, amount: float, 
             f"✅ <b>Оплата подтверждена!</b>\n\n"
             f"💵 Сумма: {amount:.2f} {currency}\n"
             f"📱 Устройства: {device_text}\n"
-            f"📅 Срок: {tariff.emoji} {tariff.title}\n"
+            f"📅 Срок: {period_emoji} {period_title}\n"
             f"🌍 Локаций: Все ({len(config.ALL_INBOUNDS)})\n\n"
             f"Нажмите кнопку ниже для подключения 👇",
             reply_markup=keyboard,
@@ -219,7 +215,7 @@ async def issue_subscription(user_id: int, devices: int, tariff, amount: float, 
                 f"👤 Пользователь: @{user['username'] or user['telegram_id']}\n"
                 f"💵 Сумма: {amount:.2f} {currency}\n"
                 f"📱 Устройства: {device_text}\n"
-                f"📅 Срок: {tariff.title}",
+                f"📅 Срок: {period_title}",
                 parse_mode="HTML"
             )
         except Exception as e:

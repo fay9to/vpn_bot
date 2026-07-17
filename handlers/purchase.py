@@ -166,8 +166,15 @@ async def process_period(callback: types.CallbackQuery, state: FSMContext):
 
     # В функции process_period, в keyboard_buttons добавь:
     keyboard_buttons = [
-        [InlineKeyboardButton(text="💎 Оплатить криптой (USDT)", callback_data="pay_crypto")],
-        [InlineKeyboardButton(text=f"💳 Оплатить картой/СБП ({price_rub} ₽)", callback_data="pay_platega")],
+        [InlineKeyboardButton(text="💎 Оплатить криптой (CryptoBot)", callback_data="pay_crypto")],
+        [InlineKeyboardButton(
+            text=f"💳 Оплатить картой {config.PLATEGA_CARD_COMMISSION_PERCENT}%",
+            callback_data=f"pay_platega_{config.PLATEGA_METHOD_CARD}"
+        )],
+        [InlineKeyboardButton(
+            text=f"🏦 Оплатить СБП {config.PLATEGA_SBP_COMMISSION_PERCENT}%",
+            callback_data=f"pay_platega_{config.PLATEGA_METHOD_SBP}"
+        )],
     ]
 
     if callback.from_user.id in config.ADMIN_IDS:
@@ -276,10 +283,24 @@ async def pay_crypto(callback: types.CallbackQuery, state: FSMContext):
 
 # handlers/purchase.py (добавь этот блок)
 
-@router.callback_query(F.data == "pay_platega", PurchaseState.waiting_payment)
+_PLATEGA_METHOD_NAMES = {
+    config.PLATEGA_METHOD_CARD: "Карта",
+    config.PLATEGA_METHOD_SBP: "СБП",
+}
+
+
+@router.callback_query(F.data.startswith("pay_platega_"), PurchaseState.waiting_payment)
 async def pay_platega(callback: types.CallbackQuery, state: FSMContext):
-    """Оплата через Platega"""
+    """Оплата через Platega (карта или СБП — метод передаётся в callback_data)"""
     from platega_client import platega
+
+    try:
+        payment_method = int(callback.data.replace("pay_platega_", ""))
+    except ValueError:
+        await callback.answer("❌ Некорректный способ оплаты", show_alert=True)
+        return
+
+    method_name = _PLATEGA_METHOD_NAMES.get(payment_method, "Platega")
 
     data = await state.get_data()
     devices = data["devices"]
@@ -297,9 +318,10 @@ async def pay_platega(callback: types.CallbackQuery, state: FSMContext):
     order_id = f"vpn_{user['id']}_{uuid.uuid4().hex[:8]}"
 
     result = await platega.create_payment(
-        order_id=order_id,
         amount=price_rub,
         description=f"Cerberus VPN - {devices} устр. на {period} дн.",
+        payload=order_id,
+        payment_method=payment_method,
     )
 
     if not result or not result.get("success"):
@@ -309,8 +331,15 @@ async def pay_platega(callback: types.CallbackQuery, state: FSMContext):
             f"❌ Ошибка создания счёта: {error_msg}\n\nПопробуйте еще раз или выберите другой способ оплаты.")
         return
 
+    # Вебхук Platega присылает только {id, amount, currency, status, paymentMethod} —
+    # поля payload там нет, поэтому храним pending-платёж под ключом transaction_id,
+    # который Platega вернула нам при создании (и которым же подпишет вебхук).
+    transaction_id = result["transaction_id"]
+    # Итоговая сумма к оплате — с уже включённой комиссией метода, её считает сама Platega
+    gross_amount = result.get("gross_amount", price_rub)
+
     await db.add_pending_payment(
-        invoice_id=order_id,
+        invoice_id=transaction_id,
         user_id=user['id'],
         devices=devices,
         tariff_days=period,
@@ -319,14 +348,14 @@ async def pay_platega(callback: types.CallbackQuery, state: FSMContext):
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="💳 Оплатить сейчас", url=result["payment_url"])],
-        [InlineKeyboardButton(text="✅ Проверить оплату", callback_data=f"check_platega_{order_id}")]
+        [InlineKeyboardButton(text="✅ Проверить оплату", callback_data=f"check_platega_{transaction_id}")]
     ])
 
     await callback.message.answer(
-        f"💳 <b>Оплата через Platega</b>\n\n"
-        f"💵 Сумма: <b>{price_rub} ₽</b>\n\n"
+        f"💳 <b>Оплата через Platega ({method_name})</b>\n\n"
+        f"💵 К оплате: <b>{gross_amount:.2f} ₽</b> (с учётом комиссии)\n\n"
         f"1️⃣ Нажмите «Оплатить сейчас»\n"
-        f"2️⃣ Выберите способ (Карта, СБП, SberPay)\n"
+        f"2️⃣ Завершите оплату ({method_name})\n"
         f"3️⃣ После оплаты нажмите «Проверить оплату»\n\n"
         f"⚡️ Подписка выдаётся автоматически!",
         reply_markup=keyboard,
@@ -338,19 +367,27 @@ async def check_platega_payment(callback: types.CallbackQuery, state: FSMContext
     """Ручная проверка оплаты Platega (на случай если вебхук задерживается)"""
     from platega_client import platega
 
-    order_id = callback.data.replace("check_platega_", "")
+    transaction_id = callback.data.replace("check_platega_", "")
 
-    payment_info = await db.get_pending_payment(order_id)
+    payment_info = await db.get_pending_payment(transaction_id)
     if not payment_info:
         # Платежа уже нет в pending — значит вебхук его обработал и выдал подписку
         await callback.answer("✅ Оплата уже подтверждена, подписка выдана!", show_alert=True)
         return
 
-    # У нас в БД нет сохранённого transaction_id Platega, поэтому просто сообщаем,
-    # что ждём вебхук — сама выдача подписки происходит в webhook_server.py
-    await callback.answer(
-        "⏳ Ожидаем подтверждение от платёжной системы. Обычно это занимает 5-15 секунд. Если оплата прошла, подписка придёт автоматически!",
-        show_alert=True)
+    # Резервная проверка через GET /transaction/{id} на случай, если вебхук
+    # ещё не дошёл (например, задержка на стороне Platega)
+    tx = await platega.get_transaction(transaction_id)
+    tx_status = str((tx or {}).get("status", "")).upper()
+
+    if tx_status == "CONFIRMED":
+        await callback.answer("✅ Оплата подтверждена! Подписка выдаётся, подождите пару секунд.", show_alert=True)
+    elif tx_status in ("CANCELED", "CHARGEBACKED"):
+        await callback.answer("❌ Платёж не прошёл или был отменён.", show_alert=True)
+    else:
+        await callback.answer(
+            "⏳ Ожидаем подтверждение от платёжной системы. Обычно это занимает 5-15 секунд. Если оплата прошла, подписка придёт автоматически!",
+            show_alert=True)
 # ==================== ТЕСТОВАЯ ОПЛАТА ====================
 
 @router.callback_query(F.data == "test_payment", PurchaseState.waiting_payment)

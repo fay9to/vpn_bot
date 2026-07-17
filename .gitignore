@@ -5,5 +5,3 @@ __pycache__/
 venv/
 *.key
 *.pem
-*.jpg
-.DS_Store

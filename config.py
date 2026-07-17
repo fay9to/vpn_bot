@@ -26,11 +26,20 @@ CRYPTO_ASSET = os.getenv("CRYPTO_ASSET", "USDT")
 # Авторизация у Platega — через заголовки X-MerchantId / X-Secret (не подпись в теле!)
 PLATEGA_ENABLED = os.getenv("PLATEGA_ENABLED", "false").lower() == "true"
 PLATEGA_BASE_URL = os.getenv("PLATEGA_BASE_URL", "https://app.platega.io")
-PLATEGA_API_VERSION = os.getenv("PLATEGA_API_VERSION", "v2")  # v1 -> /transaction/process ("redirect"), v2 -> /v2/transaction/process ("url")
+PLATEGA_API_VERSION = os.getenv("PLATEGA_API_VERSION", "v1")  # v1 -> /transaction/process ("redirect"), v2 -> /v2/transaction/process ("url")
 PLATEGA_MERCHANT_ID = os.getenv("PLATEGA_MERCHANT_ID", "")
 PLATEGA_SECRET = os.getenv("PLATEGA_SECRET", "")
 PLATEGA_RETURN_URL = os.getenv("PLATEGA_RETURN_URL", "https://t.me/cerberusVPN_robot")
 PLATEGA_FAILED_URL = os.getenv("PLATEGA_FAILED_URL", "https://t.me/cerberusVPN_robot")
+
+# Коды методов оплаты Platega (см. PaymentMethodInt в docs.platega.io):
+# 2 = СБП (QR-код) + Sberpay, 11 = Карточный эквайринг
+PLATEGA_METHOD_CARD = 11
+PLATEGA_METHOD_SBP = 2
+# Комиссии показываются в кнопках информативно — реальную итоговую сумму
+# (с уже включённой комиссией) всегда считает сама Platega и возвращает в ответе.
+PLATEGA_CARD_COMMISSION_PERCENT = 9
+PLATEGA_SBP_COMMISSION_PERCENT = 8
 
 # VPN
 VPN_DOMAIN = os.getenv("VPN_DOMAIN", "cerberusvless.top")

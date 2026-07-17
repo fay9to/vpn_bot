@@ -104,7 +104,7 @@ class Database:
 
         await self.conn.execute('''
             CREATE TABLE IF NOT EXISTS pending_payments (
-                invoice_id INTEGER PRIMARY KEY,
+                invoice_id TEXT PRIMARY KEY,
                 user_id INTEGER NOT NULL,
                 devices INTEGER NOT NULL,
                 tariff_days INTEGER NOT NULL,
@@ -259,21 +259,21 @@ class Database:
         return cursor.rowcount > 0
 
     # Pending payments
-    async def add_pending_payment(self, invoice_id: int, user_id: int, devices: int, tariff_days: int, amount: float):
+    async def add_pending_payment(self, invoice_id: str, user_id: int, devices: int, tariff_days: int, amount: float):
         await self.conn.execute(
             "INSERT OR REPLACE INTO pending_payments (invoice_id, user_id, devices, tariff_days, amount) VALUES (?, ?, ?, ?, ?)",
-            (invoice_id, user_id, devices, tariff_days, amount)
+            (str(invoice_id), user_id, devices, tariff_days, amount)
         )
         await self.conn.commit()
 
-    async def get_pending_payment(self, invoice_id: int) -> Optional[Dict]:
+    async def get_pending_payment(self, invoice_id: str) -> Optional[Dict]:
         cursor = await self.conn.cursor()
-        await cursor.execute("SELECT * FROM pending_payments WHERE invoice_id = ?", (invoice_id,))
+        await cursor.execute("SELECT * FROM pending_payments WHERE invoice_id = ?", (str(invoice_id),))
         row = await cursor.fetchone()
         return dict(row) if row else None
 
-    async def delete_pending_payment(self, invoice_id: int):
-        await self.conn.execute("DELETE FROM pending_payments WHERE invoice_id = ?", (invoice_id,))
+    async def delete_pending_payment(self, invoice_id: str):
+        await self.conn.execute("DELETE FROM pending_payments WHERE invoice_id = ?", (str(invoice_id),))
         await self.conn.commit()
 
 
