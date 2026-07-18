@@ -40,6 +40,24 @@ async def cmd_start(message: types.Message, state: FSMContext):
             await handle_gift_code(message, gift_code, state)
             return
 
+        if arg == "trial":
+            # Убедимся, что пользователь есть в БД (нужен для выдачи подписки),
+            # и сразу активируем пробную подписку одним нажатием по ссылке.
+            user = await db.get_user(message.from_user.id)
+            if not user:
+                await db.create_user(
+                    telegram_id=message.from_user.id,
+                    username=message.from_user.username,
+                    referral_code=uuid.uuid4().hex[:10]
+                )
+            ok, text, keyboard = await grant_trial_subscription(
+                message.from_user.id, message.from_user.username
+            )
+            await message.answer(text, reply_markup=keyboard, parse_mode="HTML")
+            if not ok:
+                await show_main_menu(message)
+            return
+
         referral_code = arg
         await handle_referral(message, referral_code)
     else:
@@ -64,27 +82,27 @@ async def show_main_menu(message: types.Message):
 
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [
-                InlineKeyboardButton(text="💳 Купить подписку", callback_data="buy_subscription"),
-                InlineKeyboardButton(text="🎁 Пробная подписка", callback_data="trial_subscription")
+                InlineKeyboardButton(icon_custom_emoji_id="5927169041595634481", text="Купить подписку", style="success", callback_data="buy_subscription"),
+                InlineKeyboardButton(icon_custom_emoji_id="5963213811597970978",text="Пробная подписка", style="primary", callback_data="trial_subscription")
             ],
             [
-                InlineKeyboardButton(text="👤 Личный кабинет", callback_data="profile"),
-                InlineKeyboardButton(text="👥 Рефералы", callback_data="referrals")
+                InlineKeyboardButton(icon_custom_emoji_id="5879770735999717115",text="Личный кабинет", callback_data="profile"),
+                InlineKeyboardButton(icon_custom_emoji_id="5942877472163892475",text="Рефералы", callback_data="referrals")
             ],
             [
-                InlineKeyboardButton(text="💬 Поддержка", callback_data="support"),
-                InlineKeyboardButton(text="📢 Канал", callback_data="channel")
+                InlineKeyboardButton(icon_custom_emoji_id="5884179047482659474",text="Поддержка", callback_data="support"),
+                InlineKeyboardButton(icon_custom_emoji_id="5771695636411847302",text="Канал", callback_data="channel")
             ],
             [
-                InlineKeyboardButton(text="💰 Тарифы", callback_data="tariffs_info"),
-                InlineKeyboardButton(text="📄 Документы", callback_data="documents")
+                InlineKeyboardButton(icon_custom_emoji_id="5778318458802409852",text="Тарифы", callback_data="tariffs_info"),
+                InlineKeyboardButton(icon_custom_emoji_id="5956561916573782596",text="Документы", callback_data="documents")
             ],
-            [InlineKeyboardButton(text="ℹ️ О сервисе", callback_data="about_service")]
+            [InlineKeyboardButton(icon_custom_emoji_id="5879785854284599288",text="О сервисе", style="danger", callback_data="about_service")]
         ])
 
         # Нейтральный текст БЕЗ VPN-триггеров
         welcome_text = (
-            "<b>Добро пожаловать в Cerberus VPN</b>\n\n"
+            "<tg-emoji emoji-id=""></tg-emoji><b>Добро пожаловать в Cerberus VPN</b>\n\n"
             "🔥 <b>CerberusVPN</b> — сервис защищённого соединения! 🌍✨\n\n"
             "🚀 <b>Наши преимущества:</b>\n"
             "🔹 Протокол Hysteria2 (высокая скорость)\n"
@@ -130,22 +148,28 @@ async def main_menu(callback: types.CallbackQuery, state: FSMContext):
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="💳 Купить подписку", callback_data="buy_subscription"),
-            InlineKeyboardButton(text="🎁 Пробная подписка", callback_data="trial_subscription")
+            InlineKeyboardButton(icon_custom_emoji_id="5927169041595634481", text="Купить подписку", style="success",
+                                 callback_data="buy_subscription"),
+            InlineKeyboardButton(icon_custom_emoji_id="5963213811597970978", text="Пробная подписка", style="primary",
+                                 callback_data="trial_subscription")
         ],
         [
-            InlineKeyboardButton(text="👤 Личный кабинет", callback_data="profile"),
-            InlineKeyboardButton(text="👥 Рефералы", callback_data="referrals")
+            InlineKeyboardButton(icon_custom_emoji_id="5879770735999717115", text="Личный кабинет",
+                                 callback_data="profile"),
+            InlineKeyboardButton(icon_custom_emoji_id="5942877472163892475", text="Рефералы", callback_data="referrals")
         ],
         [
-            InlineKeyboardButton(text="💬 Поддержка", callback_data="support"),
-            InlineKeyboardButton(text="📢 Канал", callback_data="channel")
+            InlineKeyboardButton(icon_custom_emoji_id="5884179047482659474", text="Поддержка", callback_data="support"),
+            InlineKeyboardButton(icon_custom_emoji_id="5771695636411847302", text="Канал", callback_data="channel")
         ],
         [
-            InlineKeyboardButton(text="💰 Тарифы", callback_data="tariffs_info"),
-            InlineKeyboardButton(text="📄 Документы", callback_data="documents")
+            InlineKeyboardButton(icon_custom_emoji_id="5778318458802409852", text="Тарифы",
+                                 callback_data="tariffs_info"),
+            InlineKeyboardButton(icon_custom_emoji_id="5956561916573782596", text="Документы",
+                                 callback_data="documents")
         ],
-        [InlineKeyboardButton(text="ℹ️ О сервисе", callback_data="about_service")]
+        [InlineKeyboardButton(icon_custom_emoji_id="5879785854284599288", text="О сервисе", style="danger",
+                              callback_data="about_service")]
     ])
 
     welcome_text = (
@@ -240,24 +264,33 @@ async def documents(callback: types.CallbackQuery):
 
 # ==================== ПРОБНАЯ ПОДПИСКА ====================
 
-@router.callback_query(F.data == "trial_subscription")
-async def trial_subscription(callback: types.CallbackQuery):
-    user = await db.get_user(callback.from_user.id)
+async def grant_trial_subscription(telegram_id: int, username: str = None):
+    """
+    Общая логика выдачи пробной подписки — используется и кнопкой
+    "🎁 Пробная подписка", и диплинком /start trial.
+    Возвращает (ok: bool, text: str, keyboard: InlineKeyboardMarkup | None).
+    """
+    user = await db.get_user(telegram_id)
+    if not user:
+        user = await db.create_user(
+            telegram_id=telegram_id,
+            username=username,
+            referral_code=uuid.uuid4().hex[:10]
+        )
 
     if not user:
-        await callback.answer("❌ Пользователь не найден", show_alert=True)
-        return
+        return False, "❌ Не удалось найти или создать пользователя", None
 
     subscription = await db.get_active_subscription(user['id'])
     if subscription:
-        await callback.answer(
+        return False, (
             "⚠️ У вас уже есть активная подписка!\n"
-            "Пробную подписку можно получить только один раз.",
-            show_alert=True
-        )
-        return
+            "Пробную подписку можно получить только один раз."
+        ), None
 
-    await callback.answer("⏳ Создаю пробную подписку...")
+    all_subs = await db.get_all_subscriptions(user['id'])
+    if any(sub['client_email'].startswith("trial_") for sub in all_subs):
+        return False, "⚠️ Вы уже использовали пробную подписку ранее.", None
 
     from panel_client import XUIPanelClient
     panel = XUIPanelClient()
@@ -275,8 +308,7 @@ async def trial_subscription(callback: types.CallbackQuery):
         )
 
         if not success:
-            await callback.message.answer("❌ Ошибка при создании пробной подписки.")
-            return
+            return False, "❌ Ошибка при создании пробной подписки.", None
 
         await db.add_subscription(
             user_id=user['id'],
@@ -289,31 +321,43 @@ async def trial_subscription(callback: types.CallbackQuery):
         sub_link = await panel.get_subscription_link(client_email)
 
         if not sub_link:
-            await callback.message.answer("⚠️ Клиент создан, но не удалось получить ссылку подписки.")
-            return
+            return True, "⚠️ Подписка создана, но не удалось получить ссылку. Загляните в «Личный кабинет».", None
 
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="📱 Подключить устройство", url=sub_link)],
-            [InlineKeyboardButton(text="💳 Купить подписку", callback_data="buy_subscription")],
-            [InlineKeyboardButton(text="🔙 Назад", callback_data="main_menu")]
+            [InlineKeyboardButton(icon_custom_emoji_id="5985833664884250583",text="Подключить устройство", url=sub_link)],
+            [InlineKeyboardButton(icon_custom_emoji_id="5927169041595634481",text="Купить подписку", callback_data="buy_subscription")],
+            [InlineKeyboardButton(icon_custom_emoji_id="5875082500023258804",text="Назад", callback_data="main_menu")]
         ])
 
-        await callback.message.answer(
+        text = (
             f"🎁 <b>Пробная подписка активирована!</b>\n\n"
             f"⏰ Срок: 3 дня\n"
             f"📱 Устройств: 3\n"
             f"💾 Трафик: 10 ГБ\n"
             f"🌍 Локаций: Все\n\n"
-            f"Нажмите кнопку ниже, чтобы добавить подписку 👇",
-            reply_markup=keyboard,
-            parse_mode="HTML"
+            f"Нажмите кнопку ниже, чтобы добавить подписку 👇"
         )
+        return True, text, keyboard
 
     except Exception as e:
         logger.error(f"Ошибка пробной подписки: {e}")
         import traceback
         traceback.print_exc()
-        await callback.message.answer(f"❌ Ошибка: {e}")
+        return False, f"❌ Ошибка: {e}", None
+
+
+@router.callback_query(F.data == "trial_subscription")
+async def trial_subscription(callback: types.CallbackQuery):
+    ok, text, keyboard = await grant_trial_subscription(
+        callback.from_user.id, callback.from_user.username
+    )
+
+    if not ok and keyboard is None and ("уже есть" in text or "уже использовали" in text):
+        await callback.answer(text, show_alert=True)
+        return
+
+    await callback.answer("⏳ Активирую пробную подписку..." if ok else "")
+    await callback.message.answer(text, reply_markup=keyboard, parse_mode="HTML")
 
 
 # ==================== ПОДДЕРЖКА ====================
@@ -321,8 +365,8 @@ async def trial_subscription(callback: types.CallbackQuery):
 @router.callback_query(F.data == "support")
 async def support(callback: types.CallbackQuery):
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💬 Написать в поддержку", url="https://t.me/basir1337")],
-        [InlineKeyboardButton(text="🔙 Назад", callback_data="main_menu")]
+        [InlineKeyboardButton(icon_custom_emoji_id="5884510167986343350",text="Написать в поддержку", url="https://t.me/basir1337")],
+        [InlineKeyboardButton(icon_custom_emoji_id="5875082500023258804",text="Назад", callback_data="main_menu")]
     ])
 
     await callback.message.answer(
@@ -429,14 +473,13 @@ async def profile(callback: types.CallbackQuery):
         keyboard_buttons.append([InlineKeyboardButton(text="📱 Подключить устройство", url=sub_link)])
 
     keyboard_buttons.extend([
-        [InlineKeyboardButton(text="💰 Баланс", callback_data="balance")],
-        [InlineKeyboardButton(text="🔄 Продлить подписку", callback_data="renew_subscription")],
-        [InlineKeyboardButton(text="⚙️ Управление подпиской", callback_data="manage_subscription")],
+        [InlineKeyboardButton(icon_custom_emoji_id="5877410604225924969",text="Продлить подписку", callback_data="renew_subscription")],
+        [InlineKeyboardButton(icon_custom_emoji_id="5877260593903177342",text="Управление подпиской", callback_data="manage_subscription")],
         [
-            InlineKeyboardButton(text="👥 Рефералы", callback_data="referrals"),
-            InlineKeyboardButton(text="🎁 Подарить", callback_data="gift")
+            InlineKeyboardButton(icon_custom_emoji_id="5942877472163892475",text="Рефералы", callback_data="referrals"),
+            InlineKeyboardButton(icon_custom_emoji_id="5963213811597970978",text="Подарить", callback_data="gift")
         ],
-        [InlineKeyboardButton(text="🔙 Назад", callback_data="main_menu")]
+        [InlineKeyboardButton(icon_custom_emoji_id="5875082500023258804",text="Назад", callback_data="main_menu")]
     ])
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
@@ -498,8 +541,8 @@ async def balance(callback: types.CallbackQuery):
 @router.callback_query(F.data == "top_up_balance")
 async def top_up_balance(callback: types.CallbackQuery):
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💬 Пополнить через поддержку", url="https://t.me/basir1337")],
-        [InlineKeyboardButton(text="🔙 Назад", callback_data="balance")]
+        [InlineKeyboardButton(icon_custom_emoji_id="5884510167986343350",text="Пополнить через поддержку", url="https://t.me/basir1337")],
+        [InlineKeyboardButton(icon_custom_emoji_id="5875082500023258804",text="Назад", callback_data="balance")]
     ])
 
     await callback.message.answer(
@@ -536,8 +579,8 @@ async def renew_subscription(callback: types.CallbackQuery, state: FSMContext):
             text=f"📱 Продлить ({current_devices} устройств)",
             callback_data=f"devices_{current_devices}"
         )],
-        [InlineKeyboardButton(text="💳 Купить новый тариф", callback_data="buy_subscription")],
-        [InlineKeyboardButton(text="🔙 Назад", callback_data="profile")]
+        [InlineKeyboardButton(icon_custom_emoji_id="5927169041595634481",text="Купить новый тариф", callback_data="buy_subscription")],
+        [InlineKeyboardButton(icon_custom_emoji_id="5875082500023258804",text="Назад", callback_data="profile")]
     ])
 
     await callback.message.answer(
@@ -560,8 +603,8 @@ async def manage_subscription(callback: types.CallbackQuery):
 
     if not subscription:
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="💳 Купить подписку", callback_data="buy_subscription")],
-            [InlineKeyboardButton(text="🔙 Назад", callback_data="profile")]
+            [InlineKeyboardButton(icon_custom_emoji_id="5927169041595634481",text="Купить подписку", callback_data="buy_subscription")],
+            [InlineKeyboardButton(icon_custom_emoji_id="5875082500023258804",text="Назад", callback_data="profile")]
         ])
 
         await callback.message.answer(
@@ -579,11 +622,11 @@ async def manage_subscription(callback: types.CallbackQuery):
     device_text = f"{subscription['device_limit']} IP"
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔄 Продлить подписку", callback_data="renew_subscription")],
-        [InlineKeyboardButton(text="📱 Мои устройства", callback_data="my_devices")],
-        [InlineKeyboardButton(text="📊 Статистика трафика", callback_data="traffic_stats")],
-        [InlineKeyboardButton(text="📜 История подписок", callback_data="subscription_history")],
-        [InlineKeyboardButton(text="🔙 Назад", callback_data="profile")]
+        [InlineKeyboardButton(icon_custom_emoji_id="5877410604225924969",text="Продлить подписку", callback_data="renew_subscription")],
+        [InlineKeyboardButton(icon_custom_emoji_id="5985833664884250583",text="Мои устройства", callback_data="my_devices")],
+        [InlineKeyboardButton(icon_custom_emoji_id="5875291072225087249",text="Статистика трафика", callback_data="traffic_stats")],
+        [InlineKeyboardButton(icon_custom_emoji_id="5900104897885376843",text="История подписок", callback_data="subscription_history")],
+        [InlineKeyboardButton(icon_custom_emoji_id="5875082500023258804",text="Назад", callback_data="profile")]
     ])
 
     await callback.message.answer(
@@ -614,8 +657,8 @@ async def my_devices(callback: types.CallbackQuery):
     sub_link = await panel.get_subscription_link(subscription['client_email'])
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📱 Подключить устройство", url=sub_link)] if sub_link else [],
-        [InlineKeyboardButton(text="🔙 Назад", callback_data="manage_subscription")]
+        [InlineKeyboardButton(icon_custom_emoji_id="5985833664884250583",text="Подключить устройство", url=sub_link)] if sub_link else [],
+        [InlineKeyboardButton(icon_custom_emoji_id="5875082500023258804",text="Назад", callback_data="manage_subscription")]
     ])
 
     device_text = f"{subscription['device_limit']} IP"
@@ -671,7 +714,7 @@ async def traffic_stats(callback: types.CallbackQuery):
         return f"{b:.2f} PB"
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔙 Назад", callback_data="manage_subscription")]
+        [InlineKeyboardButton(icon_custom_emoji_id="5875082500023258804",text="Назад", callback_data="manage_subscription")]
     ])
 
     await callback.message.answer(
@@ -717,7 +760,7 @@ async def subscription_history(callback: types.CallbackQuery):
         )
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔙 Назад", callback_data="manage_subscription")]
+        [InlineKeyboardButton(icon_custom_emoji_id="5875082500023258804",text="Назад", callback_data="manage_subscription")]
     ])
 
     await callback.message.answer(
@@ -732,9 +775,9 @@ async def subscription_history(callback: types.CallbackQuery):
 @router.callback_query(F.data == "gift")
 async def gift(callback: types.CallbackQuery):
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🎁 Активировать код", callback_data="activate_gift")],
-        [InlineKeyboardButton(text="🎟️ Создать подарок", callback_data="create_gift")],
-        [InlineKeyboardButton(text="🔙 Назад", callback_data="profile")]
+        [InlineKeyboardButton(icon_custom_emoji_id="5875180111744995604",text="Активировать код", callback_data="activate_gift")],
+        [InlineKeyboardButton(icon_custom_emoji_id="5985433648810171091",text="Создать подарок", callback_data="create_gift")],
+        [InlineKeyboardButton(icon_custom_emoji_id="5875082500023258804",text="Назад", callback_data="profile")]
     ])
 
     await callback.message.answer(
@@ -751,7 +794,7 @@ async def gift(callback: types.CallbackQuery):
 @router.callback_query(F.data == "activate_gift")
 async def activate_gift(callback: types.CallbackQuery, state: FSMContext):
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔙 Отмена", callback_data="gift")]
+        [InlineKeyboardButton(icon_custom_emoji_id="5875082500023258804",text="Отмена", callback_data="gift")]
     ])
 
     await callback.message.answer(
@@ -786,7 +829,7 @@ async def process_gift_code(message: types.Message, state: FSMContext):
 
     if gift_code['used_by']:
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔙 Назад", callback_data="gift")]
+            [InlineKeyboardButton(icon_custom_emoji_id="5875082500023258804",text="Назад", callback_data="gift")]
         ])
 
         await message.answer(
@@ -835,8 +878,8 @@ async def process_gift_code(message: types.Message, state: FSMContext):
     sub_link = await panel.get_subscription_link(client_email)
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📱 Подключить устройство", url=sub_link)] if sub_link else [],
-        [InlineKeyboardButton(text="👤 Личный кабинет", callback_data="profile")]
+        [InlineKeyboardButton(icon_custom_emoji_id="5985833664884250583",text="Подключить устройство", url=sub_link)] if sub_link else [],
+        [InlineKeyboardButton(icon_custom_emoji_id="5879770735999717115",text="Личный кабинет", callback_data="profile")]
     ])
 
     await message.answer(
@@ -870,7 +913,7 @@ async def create_gift(callback: types.CallbackQuery):
             InlineKeyboardButton(text="7 дней / 1 IP", callback_data="gift_plan_7_1"),
             InlineKeyboardButton(text="7 дней / 3 IP", callback_data="gift_plan_7_3")
         ],
-        [InlineKeyboardButton(text="🔙 Назад", callback_data="gift")]
+        [InlineKeyboardButton(icon_custom_emoji_id="5875082500023258804",text="Назад", callback_data="gift")]
     ])
 
     await callback.message.answer(
@@ -898,8 +941,8 @@ async def process_gift_plan(callback: types.CallbackQuery):
     activation_link = f"https://t.me/{bot.username}?start=gift_{code}"
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📋 Скопировать ссылку", callback_data=f"copy_gift_{code}")],
-        [InlineKeyboardButton(text="🔙 Назад", callback_data="gift")]
+        [InlineKeyboardButton(icon_custom_emoji_id="5877465816030515018",text="Скопировать ссылку", callback_data=f"copy_gift_{code}")],
+        [InlineKeyboardButton(icon_custom_emoji_id="5875082500023258804",text="Назад", callback_data="gift")]
     ])
 
     await callback.message.answer(
@@ -939,9 +982,9 @@ async def referrals(callback: types.CallbackQuery):
     stats = await db.get_referral_stats(user['id'])
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📋 Скопировать ссылку", callback_data="copy_referral_link")],
-        [InlineKeyboardButton(text="📱 Показать QR-код", callback_data="show_qr")],
-        [InlineKeyboardButton(text="🔙 Назад", callback_data="main_menu")]
+        [InlineKeyboardButton(icon_custom_emoji_id="5877465816030515018",text="Скопировать ссылку", callback_data="copy_referral_link")],
+        [InlineKeyboardButton(icon_custom_emoji_id="5891119667388354506",text="Показать QR-код", callback_data="show_qr")],
+        [InlineKeyboardButton(icon_custom_emoji_id="5875082500023258804",text="Назад", callback_data="main_menu")]
     ])
 
     await callback.message.answer(
@@ -1102,8 +1145,8 @@ async def handle_gift_code(message: types.Message, code: str, state: FSMContext)
     sub_link = await panel.get_subscription_link(client_email)
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📱 Подключить устройство", url=sub_link)] if sub_link else [],
-        [InlineKeyboardButton(text="👤 Личный кабинет", callback_data="profile")]
+        [InlineKeyboardButton(icon_custom_emoji_id="5985833664884250583",text="Подключить устройство", url=sub_link)] if sub_link else [],
+        [InlineKeyboardButton(icon_custom_emoji_id="5879770735999717115",text="Личный кабинет", callback_data="profile")]
     ])
 
     await message.answer(

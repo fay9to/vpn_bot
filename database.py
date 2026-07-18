@@ -114,6 +114,19 @@ class Database:
             )
         ''')
 
+        # Миграция: добавляем флаги уведомлений в уже существующую таблицу subscriptions
+        # (для новых БД они создаются сразу через CREATE TABLE выше не нужны —
+        # ALTER TABLE тут безопасен благодаря try/except на случай, если колонки уже есть)
+        for column_def in (
+            "notified_expiry_soon INTEGER NOT NULL DEFAULT 0",
+            "notified_expired INTEGER NOT NULL DEFAULT 0",
+            "notified_traffic_low INTEGER NOT NULL DEFAULT 0",
+        ):
+            try:
+                await self.conn.execute(f"ALTER TABLE subscriptions ADD COLUMN {column_def}")
+            except Exception:
+                pass  # колонка уже существует
+
         await self.conn.commit()
 
     async def create_user(self, telegram_id: int, username: str = None, referral_code: str = None,
@@ -228,6 +241,59 @@ class Database:
         )
         rows = await cursor.fetchall()
         return [dict(row) for row in rows]
+
+    # ==================== УВЕДОМЛЕНИЯ (истечение / трафик) ====================
+
+    async def get_subscriptions_expiring_soon(self, hours: int) -> List[Dict]:
+        """Активные подписки, которые истекут в течение `hours` часов и ещё не уведомлены."""
+        now_ms = int(datetime.now().timestamp() * 1000)
+        threshold_ms = now_ms + hours * 60 * 60 * 1000
+        cursor = await self.conn.cursor()
+        await cursor.execute(
+            """SELECT s.*, u.telegram_id FROM subscriptions s
+               JOIN users u ON u.id = s.user_id
+               WHERE s.expiry_time > ? AND s.expiry_time <= ?
+                 AND s.notified_expiry_soon = 0""",
+            (now_ms, threshold_ms)
+        )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+    async def get_expired_unnotified_subscriptions(self) -> List[Dict]:
+        """Подписки, которые уже истекли, но пользователь ещё не уведомлён об этом."""
+        now_ms = int(datetime.now().timestamp() * 1000)
+        cursor = await self.conn.cursor()
+        await cursor.execute(
+            """SELECT s.*, u.telegram_id FROM subscriptions s
+               JOIN users u ON u.id = s.user_id
+               WHERE s.expiry_time <= ? AND s.notified_expired = 0""",
+            (now_ms,)
+        )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+    async def get_active_subscriptions_for_traffic_check(self) -> List[Dict]:
+        """Все сейчас активные подписки, которым ещё не отправлено уведомление о трафике."""
+        now_ms = int(datetime.now().timestamp() * 1000)
+        cursor = await self.conn.cursor()
+        await cursor.execute(
+            """SELECT s.*, u.telegram_id FROM subscriptions s
+               JOIN users u ON u.id = s.user_id
+               WHERE s.expiry_time > ? AND s.notified_traffic_low = 0""",
+            (now_ms,)
+        )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+    async def mark_subscription_notified(self, subscription_id: int, field: str):
+        """field: 'notified_expiry_soon' | 'notified_expired' | 'notified_traffic_low'"""
+        if field not in ("notified_expiry_soon", "notified_expired", "notified_traffic_low"):
+            raise ValueError(f"Недопустимое поле уведомления: {field}")
+        await self.conn.execute(
+            f"UPDATE subscriptions SET {field} = 1 WHERE id = ?",
+            (subscription_id,)
+        )
+        await self.conn.commit()
 
     async def add_transaction(self, user_id: int, amount: float, type: str, description: str = None):
         await self.conn.execute(
