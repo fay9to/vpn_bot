@@ -1,0 +1,469 @@
+# database.py
+import aiosqlite
+from typing import Optional, Dict, Any, List
+from datetime import datetime
+
+
+class Database:
+
+    # В database.py, в класс Database добавь:
+
+    async def add_pending_payment_lolzteam(self, invoice_id: str, user_id: int,
+                                           devices: int, tariff_days: int, amount: float):
+        """Добавляет платёж LolzTeam в pending"""
+        await self.conn.execute(
+            """INSERT OR REPLACE INTO pending_payments 
+               (invoice_id, user_id, devices, tariff_days, amount, payment_method) 
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (invoice_id, user_id, devices, tariff_days, amount, "lolzteam")
+        )
+        await self.conn.commit()
+
+    async def get_pending_payment_by_lolzteam_id(self, invoice_id: str) -> Optional[Dict]:
+        """Получает платёж LolzTeam по ID"""
+        cursor = await self.conn.cursor()
+        await cursor.execute(
+            "SELECT * FROM pending_payments WHERE invoice_id = ? AND payment_method = 'lolzteam'",
+            (invoice_id,)
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+    def __init__(self):
+        self.conn = None
+
+    async def init_db(self):
+        self.conn = await aiosqlite.connect('bot.db')
+        self.conn.row_factory = aiosqlite.Row
+
+        await self.conn.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                telegram_id INTEGER UNIQUE NOT NULL,
+                username TEXT,
+                balance REAL DEFAULT 0,
+                referral_code TEXT UNIQUE,
+                referred_by INTEGER,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (referred_by) REFERENCES users(id)
+            )
+        ''')
+
+        await self.conn.execute('''
+            CREATE TABLE IF NOT EXISTS referrals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                referrer_id INTEGER NOT NULL,
+                referred_id INTEGER NOT NULL,
+                level INTEGER NOT NULL,
+                bonus_earned REAL DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (referrer_id) REFERENCES users(id),
+                FOREIGN KEY (referred_id) REFERENCES users(id)
+            )
+        ''')
+
+        await self.conn.execute('''
+            CREATE TABLE IF NOT EXISTS event_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                telegram_id INTEGER NOT NULL,
+                username TEXT,
+                event_type TEXT NOT NULL,
+                details TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+
+        await self.conn.execute('''
+            CREATE TABLE IF NOT EXISTS transactions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                amount REAL NOT NULL,
+                type TEXT NOT NULL,
+                description TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            )
+        ''')
+
+        await self.conn.execute('''
+            CREATE TABLE IF NOT EXISTS subscriptions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                client_email TEXT UNIQUE NOT NULL,
+                tariff_days INTEGER NOT NULL,
+                device_limit INTEGER NOT NULL,
+                expiry_time INTEGER NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            )
+        ''')
+
+        await self.conn.execute('''
+            CREATE TABLE IF NOT EXISTS gift_codes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                code TEXT UNIQUE NOT NULL,
+                days INTEGER NOT NULL,
+                devices INTEGER NOT NULL,
+                created_by INTEGER NOT NULL,
+                used_by INTEGER,
+                used_at TIMESTAMP,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (created_by) REFERENCES users(id),
+                FOREIGN KEY (used_by) REFERENCES users(id)
+            )
+        ''')
+
+        await self.conn.execute('''
+            CREATE TABLE IF NOT EXISTS pending_payments (
+                invoice_id TEXT PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                devices INTEGER NOT NULL,
+                tariff_days INTEGER NOT NULL,
+                amount REAL NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            )
+        ''')
+
+        # Миграция: добавляем флаги уведомлений в уже существующую таблицу subscriptions
+        # (для новых БД они создаются сразу через CREATE TABLE выше не нужны —
+        # ALTER TABLE тут безопасен благодаря try/except на случай, если колонки уже есть)
+        for column_def in (
+            "notified_expiry_soon INTEGER NOT NULL DEFAULT 0",
+            "notified_expired INTEGER NOT NULL DEFAULT 0",
+            "notified_traffic_low INTEGER NOT NULL DEFAULT 0",
+        ):
+            try:
+                await self.conn.execute(f"ALTER TABLE subscriptions ADD COLUMN {column_def}")
+            except Exception:
+                pass  # колонка уже существует
+
+        try:
+            await self.conn.execute(
+                "ALTER TABLE pending_payments ADD COLUMN renewal_subscription_id INTEGER"
+            )
+        except Exception:
+            pass  # колонка уже существует
+
+        await self.conn.commit()
+
+    async def create_user(self, telegram_id: int, username: str = None, referral_code: str = None,
+                          referred_by: int = None) -> Optional[Dict]:
+        cursor = await self.conn.cursor()
+        try:
+            await cursor.execute(
+                "INSERT INTO users (telegram_id, username, referral_code, referred_by) VALUES (?, ?, ?, ?)",
+                (telegram_id, username, referral_code, referred_by)
+            )
+            await self.conn.commit()
+            return await self.get_user(telegram_id)
+        except Exception as e:
+            print(f"Error creating user: {e}")
+            return None
+
+    async def get_user(self, telegram_id: int) -> Optional[Dict]:
+        cursor = await self.conn.cursor()
+        await cursor.execute("SELECT * FROM users WHERE telegram_id = ?", (telegram_id,))
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+    async def get_user_by_id(self, user_id: int) -> Optional[Dict]:
+        cursor = await self.conn.cursor()
+        await cursor.execute("SELECT * FROM users WHERE id = ?", (user_id,))
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+    async def update_balance(self, user_id: int, amount: float, description: str = None,
+                             tx_type: str = 'referral_bonus'):
+        await self.conn.execute(
+            "UPDATE users SET balance = balance + ? WHERE id = ?",
+            (amount, user_id)
+        )
+
+        if description:
+            await self.conn.execute(
+                "INSERT INTO transactions (user_id, amount, type, description) VALUES (?, ?, ?, ?)",
+                (user_id, amount, tx_type, description)
+            )
+
+        await self.conn.commit()
+
+    async def get_transactions(self, user_id: int, limit: int = 10) -> List[Dict]:
+        cursor = await self.conn.cursor()
+        await cursor.execute(
+            "SELECT * FROM transactions WHERE user_id = ? ORDER BY created_at DESC LIMIT ?",
+            (user_id, limit)
+        )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+    async def get_referral_stats(self, user_id: int) -> Dict[str, Any]:
+        cursor = await self.conn.cursor()
+
+        await cursor.execute("""
+            SELECT 
+                level,
+                COUNT(*) as count,
+                COALESCE(SUM(bonus_earned), 0) as total_bonus
+            FROM referrals 
+            WHERE referrer_id = ? 
+            GROUP BY level
+        """, (user_id,))
+
+        rows = await cursor.fetchall()
+        stats = {
+            'level_1': 0, 'level_2': 0, 'level_3': 0,
+            'total_bonus': 0, 'total_earned': 0, 'total': 0
+        }
+
+        for row in rows:
+            level, count, bonus = row['level'], row['count'], row['total_bonus']
+            stats[f'level_{level}'] = count
+            stats['total'] += count
+            stats['total_bonus'] += bonus
+            stats['total_earned'] += bonus
+
+        return stats
+
+    async def add_referral(self, referrer_id: int, referred_id: int, level: int, bonus: float = 0):
+        await self.conn.execute(
+            "INSERT INTO referrals (referrer_id, referred_id, level, bonus_earned) VALUES (?, ?, ?, ?)",
+            (referrer_id, referred_id, level, bonus)
+        )
+        await self.conn.commit()
+
+    async def add_subscription(self, user_id: int, client_email: str, tariff_days: int, device_limit: int,
+                               expiry_time: int):
+        await self.conn.execute(
+            """INSERT OR REPLACE INTO subscriptions 
+               (user_id, client_email, tariff_days, device_limit, expiry_time) 
+               VALUES (?, ?, ?, ?, ?)""",
+            (user_id, client_email, tariff_days, device_limit, expiry_time)
+        )
+        await self.conn.commit()
+
+    async def get_active_subscription(self, user_id: int) -> Optional[Dict]:
+        cursor = await self.conn.cursor()
+        await cursor.execute(
+            "SELECT * FROM subscriptions WHERE user_id = ? AND expiry_time > ? ORDER BY expiry_time DESC LIMIT 1",
+            (user_id, int(datetime.now().timestamp() * 1000))
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+    async def get_subscription_by_id(self, subscription_id: int) -> Optional[Dict]:
+        cursor = await self.conn.cursor()
+        await cursor.execute("SELECT * FROM subscriptions WHERE id = ?", (subscription_id,))
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+    async def extend_subscription(self, subscription_id: int, new_expiry_time: int):
+        """Продлевает существующую подписку (тот же client_email/ссылка), не создавая новую запись."""
+        await self.conn.execute(
+            """UPDATE subscriptions
+               SET expiry_time = ?, notified_expiry_soon = 0, notified_expired = 0, notified_traffic_low = 0
+               WHERE id = ?""",
+            (new_expiry_time, subscription_id)
+        )
+        await self.conn.commit()
+
+    async def get_all_subscriptions(self, user_id: int) -> List[Dict]:
+        cursor = await self.conn.cursor()
+        await cursor.execute(
+            "SELECT * FROM subscriptions WHERE user_id = ? ORDER BY created_at DESC",
+            (user_id,)
+        )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+    # ==================== УВЕДОМЛЕНИЯ (истечение / трафик) ====================
+
+    async def get_subscriptions_expiring_soon(self, hours: int) -> List[Dict]:
+        """Активные подписки, которые истекут в течение `hours` часов и ещё не уведомлены."""
+        now_ms = int(datetime.now().timestamp() * 1000)
+        threshold_ms = now_ms + hours * 60 * 60 * 1000
+        cursor = await self.conn.cursor()
+        await cursor.execute(
+            """SELECT s.*, u.telegram_id FROM subscriptions s
+               JOIN users u ON u.id = s.user_id
+               WHERE s.expiry_time > ? AND s.expiry_time <= ?
+                 AND s.notified_expiry_soon = 0""",
+            (now_ms, threshold_ms)
+        )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+    async def get_expired_unnotified_subscriptions(self) -> List[Dict]:
+        """Подписки, которые уже истекли, но пользователь ещё не уведомлён об этом."""
+        now_ms = int(datetime.now().timestamp() * 1000)
+        cursor = await self.conn.cursor()
+        await cursor.execute(
+            """SELECT s.*, u.telegram_id FROM subscriptions s
+               JOIN users u ON u.id = s.user_id
+               WHERE s.expiry_time <= ? AND s.notified_expired = 0""",
+            (now_ms,)
+        )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+    async def get_active_subscriptions_for_traffic_check(self) -> List[Dict]:
+        """Все сейчас активные подписки, которым ещё не отправлено уведомление о трафике."""
+        now_ms = int(datetime.now().timestamp() * 1000)
+        cursor = await self.conn.cursor()
+        await cursor.execute(
+            """SELECT s.*, u.telegram_id FROM subscriptions s
+               JOIN users u ON u.id = s.user_id
+               WHERE s.expiry_time > ? AND s.notified_traffic_low = 0""",
+            (now_ms,)
+        )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+    async def mark_subscription_notified(self, subscription_id: int, field: str):
+        """field: 'notified_expiry_soon' | 'notified_expired' | 'notified_traffic_low'"""
+        if field not in ("notified_expiry_soon", "notified_expired", "notified_traffic_low"):
+            raise ValueError(f"Недопустимое поле уведомления: {field}")
+        await self.conn.execute(
+            f"UPDATE subscriptions SET {field} = 1 WHERE id = ?",
+            (subscription_id,)
+        )
+        await self.conn.commit()
+
+    async def add_transaction(self, user_id: int, amount: float, type: str, description: str = None):
+        await self.conn.execute(
+            "INSERT INTO transactions (user_id, amount, type, description) VALUES (?, ?, ?, ?)",
+            (user_id, amount, type, description)
+        )
+        await self.conn.commit()
+
+    async def create_gift_code(self, code: str, days: int, devices: int, created_by: int):
+        await self.conn.execute(
+            "INSERT INTO gift_codes (code, days, devices, created_by) VALUES (?, ?, ?, ?)",
+            (code, days, devices, created_by)
+        )
+        await self.conn.commit()
+
+    async def get_gift_code(self, code: str) -> Optional[Dict]:
+        cursor = await self.conn.cursor()
+        await cursor.execute("SELECT * FROM gift_codes WHERE code = ?", (code,))
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+    async def use_gift_code(self, code: str, used_by: int) -> bool:
+        cursor = await self.conn.cursor()
+        await cursor.execute(
+            "UPDATE gift_codes SET used_by = ?, used_at = CURRENT_TIMESTAMP WHERE code = ? AND used_by IS NULL",
+            (used_by, code)
+        )
+        await self.conn.commit()
+        return cursor.rowcount > 0
+
+    # Pending payments
+    async def add_pending_payment(self, invoice_id: str, user_id: int, devices: int, tariff_days: int, amount: float,
+                                   renewal_subscription_id: int = None):
+        await self.conn.execute(
+            "INSERT OR REPLACE INTO pending_payments (invoice_id, user_id, devices, tariff_days, amount, renewal_subscription_id) VALUES (?, ?, ?, ?, ?, ?)",
+            (str(invoice_id), user_id, devices, tariff_days, amount, renewal_subscription_id)
+        )
+        await self.conn.commit()
+
+    async def get_pending_payment(self, invoice_id: str) -> Optional[Dict]:
+        cursor = await self.conn.cursor()
+        await cursor.execute("SELECT * FROM pending_payments WHERE invoice_id = ?", (str(invoice_id),))
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+    async def delete_pending_payment(self, invoice_id: str):
+        await self.conn.execute("DELETE FROM pending_payments WHERE invoice_id = ?", (str(invoice_id),))
+        await self.conn.commit()
+
+    # ==================== ЛОГИ ДЕЙСТВИЙ / АДМИН-СТАТИСТИКА ====================
+
+    async def log_event(self, telegram_id: int, event_type: str, username: str = None, details: str = None):
+        """
+        Записывает событие для админ-статистики.
+        event_type, например: 'start', 'trial_activated', 'purchase', 'renewal', 'referral'.
+        """
+        await self.conn.execute(
+            "INSERT INTO event_log (telegram_id, username, event_type, details) VALUES (?, ?, ?, ?)",
+            (telegram_id, username, event_type, details)
+        )
+        await self.conn.commit()
+
+    async def has_used_trial(self, telegram_id: int) -> bool:
+        """Проверяет по event_log, активировал ли пользователь пробную подписку ранее
+        (email клиентов теперь случайный, поэтому по нему определить нельзя)."""
+        cursor = await self.conn.cursor()
+        await cursor.execute(
+            "SELECT 1 FROM event_log WHERE telegram_id = ? AND event_type = 'trial_activated' LIMIT 1",
+            (telegram_id,)
+        )
+        row = await cursor.fetchone()
+        return row is not None
+
+    async def get_recent_events(self, limit: int = 20, event_type: str = None) -> List[Dict]:
+        cursor = await self.conn.cursor()
+        if event_type:
+            await cursor.execute(
+                "SELECT * FROM event_log WHERE event_type = ? ORDER BY id DESC LIMIT ?",
+                (event_type, limit)
+            )
+        else:
+            await cursor.execute(
+                "SELECT * FROM event_log ORDER BY id DESC LIMIT ?",
+                (limit,)
+            )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+    async def get_admin_stats(self) -> Dict[str, Any]:
+        """Сводная статистика для /admin"""
+        now_ms = int(datetime.now().timestamp() * 1000)
+        today_str = datetime.now().strftime("%Y-%m-%d")
+
+        cursor = await self.conn.cursor()
+
+        await cursor.execute("SELECT COUNT(*) AS c FROM users")
+        total_users = (await cursor.fetchone())["c"]
+
+        await cursor.execute("SELECT COUNT(*) AS c FROM users WHERE date(created_at) = ?", (today_str,))
+        new_users_today = (await cursor.fetchone())["c"]
+
+        await cursor.execute("SELECT COUNT(*) AS c FROM subscriptions WHERE expiry_time > ?", (now_ms,))
+        active_subscriptions = (await cursor.fetchone())["c"]
+
+        await cursor.execute(
+            "SELECT COUNT(*) AS c FROM subscriptions WHERE client_email LIKE 'trial_%'"
+        )
+        total_trials = (await cursor.fetchone())["c"]
+
+        await cursor.execute(
+            "SELECT COUNT(*) AS c FROM event_log WHERE event_type = 'start' AND date(created_at) = ?",
+            (today_str,)
+        )
+        starts_today = (await cursor.fetchone())["c"]
+
+        await cursor.execute(
+            "SELECT COUNT(*) AS c FROM event_log WHERE event_type = 'purchase' AND date(created_at) = ?",
+            (today_str,)
+        )
+        purchases_today = (await cursor.fetchone())["c"]
+
+        await cursor.execute(
+            "SELECT COUNT(*) AS c FROM event_log WHERE event_type = 'trial_activated' AND date(created_at) = ?",
+            (today_str,)
+        )
+        trials_today = (await cursor.fetchone())["c"]
+
+        return {
+            "total_users": total_users,
+            "new_users_today": new_users_today,
+            "active_subscriptions": active_subscriptions,
+            "total_trials": total_trials,
+            "starts_today": starts_today,
+            "purchases_today": purchases_today,
+            "trials_today": trials_today,
+        }
+
+
+db = Database()
