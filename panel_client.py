@@ -2,11 +2,25 @@
 import httpx
 import json
 import re
+import random
+import string
 from typing import Optional, Dict, Any, List
 import config
 import logging
 
 logger = logging.getLogger(__name__)
+
+_EMAIL_DOMAINS = ["gmail.com", "outlook.com", "yandex.ru", "mail.ru", "proton.me", "icloud.com"]
+
+
+def generate_client_email() -> str:
+    """
+    Случайный email для клиента панели — без говорящих префиксов вроде
+    trial_/user_/test_, чтобы в панели клиенты не выделялись по назначению.
+    """
+    local_part = "".join(random.choices(string.ascii_lowercase + string.digits, k=10))
+    domain = random.choice(_EMAIL_DOMAINS)
+    return f"{local_part}@{domain}"
 
 
 class XUIPanelClient:
@@ -93,6 +107,31 @@ class XUIPanelClient:
         """Обновляет клиента"""
         result = await self._request("POST", f"clients/update/{email}", json=kwargs)
         return result.get("success", False)
+
+    async def extend_client_expiry(self, email: str, new_expiry_time: int) -> bool:
+        """
+        Продлевает срок действия УЖЕ СУЩЕСТВУЮЩЕГО клиента, сохраняя тот же
+        email/subId — то есть уже выданная пользователю ссылка подписки
+        продолжает работать без переподключения.
+        """
+        client_info = await self.get_client_info(email)
+        if not client_info:
+            logger.error(f"❌ Клиент {email} не найден на панели — продлить не удалось")
+            return False
+
+        client_data = dict(client_info.get("client", {}))
+        client_data["expiryTime"] = new_expiry_time
+        client_data["enable"] = True
+
+        logger.info(f"🔄 Продление клиента {email} до {new_expiry_time}")
+        result = await self._request("POST", f"clients/update/{email}", json={"client": client_data})
+
+        if result.get("success"):
+            logger.info(f"✅ Клиент {email} успешно продлён")
+            return True
+
+        logger.error(f"❌ Не удалось продлить клиента {email}: {result}")
+        return False
 
     async def delete_client(self, email: str) -> bool:
         """Удаляет клиента"""

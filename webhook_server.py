@@ -47,7 +47,10 @@ async def cryptobot_webhook(request: Request):
         devices = payment_info["devices"]
         tariff_days = payment_info["tariff_days"]
 
-        await issue_subscription(user_id, devices, tariff_days, amount, asset)
+        await issue_subscription(
+            user_id, devices, tariff_days, amount, asset,
+            renewal_subscription_id=payment_info.get("renewal_subscription_id")
+        )
         await db.delete_pending_payment(invoice_id)
 
         return JSONResponse({"status": "ok"})
@@ -120,7 +123,10 @@ async def platega_webhook(request: Request):
 
         # Выдаем подписку
         logger.info(f"✅ Выдача подписки для user_id={user_id}, devices={devices}, days={tariff_days}")
-        await issue_subscription(user_id, devices, tariff_days, amount, "RUB")
+        await issue_subscription(
+            user_id, devices, tariff_days, amount, "RUB",
+            renewal_subscription_id=payment_info.get("renewal_subscription_id")
+        )
 
         # Удаляем из pending
         await db.delete_pending_payment(transaction_id)
@@ -140,9 +146,10 @@ async def health():
     return {"status": "ok"}
 
 
-async def issue_subscription(user_id: int, devices: int, tariff_days: int, amount: float, currency: str):
-    """Выдача подписки после оплаты"""
-    from panel_client import XUIPanelClient
+async def issue_subscription(user_id: int, devices: int, tariff_days: int, amount: float, currency: str,
+                              renewal_subscription_id: int = None):
+    """Выдача подписки после оплаты (новая) либо продление существующей"""
+    from panel_client import XUIPanelClient, generate_client_email
     from aiogram import Bot
     from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
@@ -153,7 +160,105 @@ async def issue_subscription(user_id: int, devices: int, tariff_days: int, amoun
         logger.error(f"❌ User {user_id} not found")
         return
 
-    client_email = f"user_{uuid.uuid4().hex[:10]}"
+    period_title = config.PERIOD_NAMES.get(tariff_days, f"{tariff_days} дн.")
+    period_emoji = config.PERIOD_EMOJIS.get(tariff_days, "📅")
+    device_text = "♾️ Безлимит" if devices == 0 else f"{devices} устройств"
+    bot = Bot(token=config.BOT_TOKEN)
+
+    # ==================== ПРОДЛЕНИЕ существующей подписки ====================
+    if renewal_subscription_id:
+        subscription = await db.get_subscription_by_id(renewal_subscription_id)
+
+        if not subscription or subscription["user_id"] != user_id:
+            logger.error(f"❌ Продление: подписка {renewal_subscription_id} не найдена/не принадлежит юзеру {user_id}")
+            # Не молчим — сообщаем админам, чтобы разобрались вручную, деньги-то уже пришли
+            for admin_id in config.ADMIN_IDS:
+                try:
+                    await bot.send_message(
+                        admin_id,
+                        f"⚠️ <b>Ошибка продления!</b>\n\n"
+                        f"user_id={user_id}, renewal_subscription_id={renewal_subscription_id}\n"
+                        f"Подписка не найдена. Оплата {amount:.2f} {currency} прошла, "
+                        f"нужно продлить вручную!",
+                        parse_mode="HTML"
+                    )
+                except Exception:
+                    pass
+            await bot.session.close()
+            return
+
+        now_ms = int(time.time() * 1000)
+        base_time = max(subscription["expiry_time"], now_ms)
+        new_expiry_time = base_time + tariff_days * 24 * 60 * 60 * 1000
+
+        extended = await panel.extend_client_expiry(subscription["client_email"], new_expiry_time)
+
+        if not extended:
+            logger.error(f"❌ Не удалось продлить клиента {subscription['client_email']} на панели")
+            for admin_id in config.ADMIN_IDS:
+                try:
+                    await bot.send_message(
+                        admin_id,
+                        f"⚠️ <b>Ошибка продления на панели!</b>\n\n"
+                        f"user_id={user_id}, client_email={subscription['client_email']}\n"
+                        f"Оплата {amount:.2f} {currency} прошла, но панель не продлила клиента. "
+                        f"Нужно продлить вручную!",
+                        parse_mode="HTML"
+                    )
+                except Exception:
+                    pass
+            await bot.session.close()
+            return
+
+        await db.extend_subscription(renewal_subscription_id, new_expiry_time)
+
+        await db.log_event(
+            telegram_id=user['telegram_id'],
+            event_type="renewal",
+            username=user.get('username'),
+            details=f"{tariff_days}d +{amount:.2f} {currency}, sub_id={renewal_subscription_id}"
+        )
+
+        sub_link = await panel.get_subscription_link(subscription["client_email"])
+        keyboard_buttons = []
+        if sub_link:
+            keyboard_buttons.append([InlineKeyboardButton(text="📱 Моя ссылка подписки", url=sub_link)])
+        keyboard_buttons.append([InlineKeyboardButton(text="👤 Личный кабинет", callback_data="profile")])
+        keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
+
+        try:
+            await bot.send_message(
+                user['telegram_id'],
+                f"✅ <b>Подписка продлена!</b>\n\n"
+                f"💵 Сумма: {amount:.2f} {currency}\n"
+                f"➕ Добавлено: {period_emoji} {period_title}\n"
+                f"📅 Новая дата окончания: "
+                f"<code>{time.strftime('%d.%m.%Y %H:%M', time.localtime(new_expiry_time / 1000))}</code>\n\n"
+                f"Ссылка и настройки VPN не изменились — переподключаться не нужно.",
+                reply_markup=keyboard,
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            logger.error(f"❌ Failed to notify user: {e}")
+
+        for admin_id in config.ADMIN_IDS:
+            try:
+                await bot.send_message(
+                    admin_id,
+                    f"🔄 <b>Продление подписки!</b>\n\n"
+                    f"👤 Пользователь: @{user['username'] or user['telegram_id']}\n"
+                    f"💵 Сумма: {amount:.2f} {currency}\n"
+                    f"➕ Срок: {period_title}",
+                    parse_mode="HTML"
+                )
+            except Exception as e:
+                logger.error(f"❌ Failed to notify admin {admin_id}: {e}")
+
+        await bot.session.close()
+        return
+
+    # ==================== НОВАЯ подписка ====================
+    client_email = generate_client_email()
     expiry_time = int(time.time() * 1000) + (tariff_days * 24 * 60 * 60 * 1000)
 
     success = await panel.add_client_to_all_inbounds(
@@ -164,6 +269,7 @@ async def issue_subscription(user_id: int, devices: int, tariff_days: int, amoun
 
     if not success:
         logger.error(f"❌ Failed to create client {client_email}")
+        await bot.session.close()
         return
 
     await db.add_subscription(
@@ -174,12 +280,14 @@ async def issue_subscription(user_id: int, devices: int, tariff_days: int, amoun
         expiry_time=expiry_time
     )
 
-    bot = Bot(token=config.BOT_TOKEN)
-    sub_link = await panel.get_subscription_link(client_email)
+    await db.log_event(
+        telegram_id=user['telegram_id'],
+        event_type="purchase",
+        username=user.get('username'),
+        details=f"{devices} устр., {tariff_days}d, {amount:.2f} {currency}, email={client_email}"
+    )
 
-    device_text = "♾️ Безлимит" if devices == 0 else f"{devices} устройств"
-    period_title = config.PERIOD_NAMES.get(tariff_days, f"{tariff_days} дн.")
-    period_emoji = config.PERIOD_EMOJIS.get(tariff_days, "📅")
+    sub_link = await panel.get_subscription_link(client_email)
 
     keyboard_buttons = []
     if sub_link:
@@ -198,8 +306,7 @@ async def issue_subscription(user_id: int, devices: int, tariff_days: int, amoun
             f"✅ <b>Оплата подтверждена!</b>\n\n"
             f"💵 Сумма: {amount:.2f} {currency}\n"
             f"📱 Устройства: {device_text}\n"
-            f"📅 Срок: {period_emoji} {period_title}\n"
-            f"🌍 Локаций: Все ({len(config.ALL_INBOUNDS)})\n\n"
+            f"📅 Срок: {period_emoji} {period_title}\n\n"
             f"Нажмите кнопку ниже для подключения 👇",
             reply_markup=keyboard,
             parse_mode="HTML"

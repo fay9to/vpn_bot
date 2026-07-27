@@ -13,28 +13,13 @@ import config
 logger = logging.getLogger(__name__)
 router = Router()
 
-from panel_client import XUIPanelClient
+from panel_client import XUIPanelClient, generate_client_email
 from database import db
 
 panel = XUIPanelClient()
 
 
-def pluralize_devices(n: int) -> str:
-    """Правильное склонение слова 'устройство' для русского языка"""
-    n = abs(n) % 100
-    n1 = n % 10
-
-    if 10 < n < 20:
-        return f"{n} устройств"
-    if n1 == 1:
-        return f"{n} устройство"
-    if 2 <= n1 <= 4:
-        return f"{n} устройства"
-    return f"{n} устройств"
-
-
 class PurchaseState(StatesGroup):
-    selecting_devices = State()
     selecting_period = State()
     waiting_payment = State()
 
@@ -70,73 +55,34 @@ def get_invoice_sync(invoice_id: int):
     return response.json()
 
 
-# ==================== НАЧАЛО ПОКУПКИ ====================
+def _period_keyboard() -> InlineKeyboardMarkup:
+    keyboard_buttons = []
+    for period in config.SUBSCRIPTION_PERIODS:
+        price_rub = config.TARIFF_PRICES.get(period, 0)
+        emoji = config.PERIOD_EMOJIS.get(period, "📅")
+        period_name = config.PERIOD_NAMES.get(period, f"{period} дней")
+        keyboard_buttons.append([InlineKeyboardButton(
+            text=f"{emoji} {period_name} — {price_rub}₽",
+            callback_data=f"period_{period}"
+        )])
+    keyboard_buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="main_menu")])
+    return InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
+
+
+# ==================== НАЧАЛО ПОКУПКИ (единый тариф, без выбора устройств) ====================
 
 @router.callback_query(F.data == "buy_subscription")
 async def start_purchase(callback: types.CallbackQuery, state: FSMContext):
-    """Начало покупки - выбор количества устройств"""
+    """Начало покупки — сразу выбор срока подписки (тариф один, устройства не ограничены)"""
     logger.info(f"🛒 Начало покупки от {callback.from_user.id}")
 
     await state.clear()
-
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(
-            text=f"📱 {pluralize_devices(devices)}",
-            callback_data=f"devices_{devices}"
-        )]
-        for devices in [3, 5, 10]
-    ])
-
-    keyboard.inline_keyboard.append([InlineKeyboardButton(text="🔙 Назад", callback_data="main_menu")])
+    await state.update_data(devices=0)  # 0 = без ограничений по устройствам
 
     await callback.message.answer(
-        "📱 <b>Выберите количество устройств:</b>\n\n"
-        "🔒 Количество устройств = количество одновременных подключений\n\n"
-        "📡 Все локации включены:\n"
-        "• 🇱🇻 Латвия\n"
-        "• 🇳🇱 Нидерланды\n"
-        "• 🇫🇮 Финляндия\n\n"
-        "💡 Одно подключение работает на ВСЕХ серверах",
-        reply_markup=keyboard,
-        parse_mode="HTML"
-    )
-    await state.set_state(PurchaseState.selecting_devices)
-    await callback.answer()
-
-
-# ==================== ВЫБОР УСТРОЙСТВ ====================
-
-@router.callback_query(F.data.startswith("devices_"),
-                       PurchaseState.selecting_devices)
-async def process_devices(callback: types.CallbackQuery, state: FSMContext):
-    """Выбор устройств → выбор периода"""
-    devices = int(callback.data.split("_")[1])
-    await state.update_data(devices=devices)
-
-    prices = config.TARIFF_PRICES.get(devices, {})
-
-    keyboard_buttons = []
-    for period in config.SUBSCRIPTION_PERIODS:
-        price_rub = prices.get(period, 0)
-        emoji = config.PERIOD_EMOJIS.get(period, "📅")
-        period_name = config.PERIOD_NAMES.get(period, f"{period} дней")
-
-        keyboard_buttons.append([
-            InlineKeyboardButton(
-                text=f"{emoji} {period_name} - {price_rub}₽",
-                callback_data=f"period_{period}"
-            )
-        ])
-
-    keyboard_buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="buy_subscription")])
-    keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
-
-    devices_text = pluralize_devices(devices)
-
-    await callback.message.answer(
-        f"✅ Выбрано: <b>{devices_text}</b>\n\n"
-        f"📅 <b>Выберите срок подписки:</b>",
-        reply_markup=keyboard,
+        "♾️ <b>Безлимит устройств</b> — одно подключение работает без ограничений по числу устройств\n\n"
+        "📅 <b>Выберите срок подписки:</b>",
+        reply_markup=_period_keyboard(),
         parse_mode="HTML"
     )
     await state.set_state(PurchaseState.selecting_period)
@@ -153,20 +99,18 @@ async def process_period(callback: types.CallbackQuery, state: FSMContext):
     await state.update_data(period=period)
 
     data = await state.get_data()
-    devices = data["devices"]
+    devices = data.get("devices", 0)
 
-    price_rub = config.TARIFF_PRICES[devices][period]
+    price_rub = config.TARIFF_PRICES[period]
     price_usdt = round(price_rub / config.USDT_TO_RUB_RATE, 2)
 
     await state.update_data(price_rub=price_rub, price_usdt=price_usdt)
 
     period_name = config.PERIOD_NAMES.get(period, f"{period} дней")
     period_emoji = config.PERIOD_EMOJIS.get(period, "📅")
-    devices_text = pluralize_devices(devices)
 
-    # В функции process_period, в keyboard_buttons добавь:
     keyboard_buttons = [
-        [InlineKeyboardButton(text="💎 Оплатить криптой (CryptoBot)", callback_data="pay_crypto")],
+        [InlineKeyboardButton(text="🍬 Оплатить криптой (CryptoBot)", callback_data="pay_crypto")],
         [InlineKeyboardButton(
             text=f"💳 Оплатить картой {config.PLATEGA_CARD_COMMISSION_PERCENT}%",
             callback_data=f"pay_platega_{config.PLATEGA_METHOD_CARD}"
@@ -189,12 +133,11 @@ async def process_period(callback: types.CallbackQuery, state: FSMContext):
 
     await callback.message.answer(
         f"📋 <b>Детали покупки:</b>\n\n"
-        f"📱 Устройства: {devices_text}\n"
-        f"📅 Срок: {period_emoji} {period_name}\n"
-        f"🌍 Локации: Все ({len(config.ALL_INBOUNDS)})\n\n"
+        f"♾️ Устройства: без ограничений\n"
+        f"📅 Срок: {period_emoji} {period_name}\n\n"
         f"💵 <b>Стоимость:</b>\n"
         f"💰 {price_rub} ₽\n"
-        f"💎 ~{price_usdt} USDT\n\n"
+        f"🍬 ~{price_usdt} USDT\n\n"
         f"💳 Выберите способ оплаты:",
         reply_markup=keyboard,
         parse_mode="HTML"
@@ -209,14 +152,13 @@ async def process_period(callback: types.CallbackQuery, state: FSMContext):
 async def pay_crypto(callback: types.CallbackQuery, state: FSMContext):
     """Оплата через CryptoBot"""
     data = await state.get_data()
-    devices = data["devices"]
+    devices = data.get("devices", 0)
     period = data["period"]
     price_usdt = data["price_usdt"]
     price_rub = data["price_rub"]
 
-    user_id = uuid.uuid4().hex[:10]
+    payload_id = uuid.uuid4().hex[:10]
     period_name = config.PERIOD_NAMES.get(period, f"{period} дней")
-    devices_text = pluralize_devices(devices)
 
     try:
         loop = asyncio.get_event_loop()
@@ -225,8 +167,8 @@ async def pay_crypto(callback: types.CallbackQuery, state: FSMContext):
             lambda: create_invoice_sync(
                 amount=price_usdt,
                 asset=config.CRYPTO_ASSET,
-                description=f"Cerberus VPN - {devices_text} на {period_name}",
-                payload=f"{user_id}_{devices}_{period}"
+                description=f"Cerberus VPN — {period_name}",
+                payload=f"{payload_id}_{period}"
             )
         )
 
@@ -250,7 +192,8 @@ async def pay_crypto(callback: types.CallbackQuery, state: FSMContext):
             user_id=user['id'],
             devices=devices,
             tariff_days=period,
-            amount=price_usdt
+            amount=price_usdt,
+            renewal_subscription_id=data.get("renewal_subscription_id")
         )
 
     except Exception as e:
@@ -260,15 +203,14 @@ async def pay_crypto(callback: types.CallbackQuery, state: FSMContext):
         return
 
     keyboard_buttons = [
-        [InlineKeyboardButton(text="💎 Оплатить через CryptoBot", url=pay_url)],
+        [InlineKeyboardButton(text="🍬 Оплатить через CryptoBot", url=pay_url)],
         [InlineKeyboardButton(text="✅ Проверить оплату", callback_data=f"check_payment_{invoice_id}")]
     ]
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
 
     await callback.message.answer(
-        f"💎 <b>Оплата криптовалютой</b>\n\n"
-        f"📱 Устройства: {devices_text}\n"
+        f"🍬 <b>Оплата криптовалютой</b>\n\n"
         f"📅 Срок: {period_name}\n"
         f"💵 Сумма: <b>{price_usdt} USDT</b> (~{price_rub} ₽)\n\n"
         f"1️⃣ Нажмите кнопку «Оплатить»\n"
@@ -281,7 +223,7 @@ async def pay_crypto(callback: types.CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
-# handlers/purchase.py (добавь этот блок)
+# ==================== ОПЛАТА ЧЕРЕЗ PLATEGA (карта / СБП) ====================
 
 _PLATEGA_METHOD_NAMES = {
     config.PLATEGA_METHOD_CARD: "Карта",
@@ -303,7 +245,7 @@ async def pay_platega(callback: types.CallbackQuery, state: FSMContext):
     method_name = _PLATEGA_METHOD_NAMES.get(payment_method, "Platega")
 
     data = await state.get_data()
-    devices = data["devices"]
+    devices = data.get("devices", 0)
     period = data["period"]
     price_rub = data["price_rub"]
 
@@ -319,7 +261,7 @@ async def pay_platega(callback: types.CallbackQuery, state: FSMContext):
 
     result = await platega.create_payment(
         amount=price_rub,
-        description=f"Cerberus VPN - {devices} устр. на {period} дн.",
+        description=f"Cerberus VPN — {period} дн.",
         payload=order_id,
         payment_method=payment_method,
     )
@@ -343,7 +285,8 @@ async def pay_platega(callback: types.CallbackQuery, state: FSMContext):
         user_id=user['id'],
         devices=devices,
         tariff_days=period,
-        amount=price_rub
+        amount=price_rub,
+        renewal_subscription_id=data.get("renewal_subscription_id")
     )
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -361,6 +304,7 @@ async def pay_platega(callback: types.CallbackQuery, state: FSMContext):
         reply_markup=keyboard,
         parse_mode="HTML"
     )
+
 
 @router.callback_query(F.data.startswith("check_platega_"), PurchaseState.waiting_payment)
 async def check_platega_payment(callback: types.CallbackQuery, state: FSMContext):
@@ -388,6 +332,8 @@ async def check_platega_payment(callback: types.CallbackQuery, state: FSMContext
         await callback.answer(
             "⏳ Ожидаем подтверждение от платёжной системы. Обычно это занимает 5-15 секунд. Если оплата прошла, подписка придёт автоматически!",
             show_alert=True)
+
+
 # ==================== ТЕСТОВАЯ ОПЛАТА ====================
 
 @router.callback_query(F.data == "test_payment", PurchaseState.waiting_payment)
@@ -398,10 +344,10 @@ async def test_payment(callback: types.CallbackQuery, state: FSMContext):
         return
 
     data = await state.get_data()
-    devices = data["devices"]
+    devices = data.get("devices", 0)
     period = data["period"]
 
-    client_email = f"test_{uuid.uuid4().hex[:10]}"
+    client_email = generate_client_email()
     expiry_time = int(time.time() * 1000) + (period * 24 * 60 * 60 * 1000)
 
     await callback.message.answer("⏳ [ТЕСТ] Создаю подключение...")
@@ -442,7 +388,6 @@ async def test_payment(callback: types.CallbackQuery, state: FSMContext):
         return
 
     period_name = config.PERIOD_NAMES.get(period, f"{period} дней")
-    devices_text = pluralize_devices(devices)
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📱 Подключить устройство", url=sub_link)],
@@ -452,9 +397,8 @@ async def test_payment(callback: types.CallbackQuery, state: FSMContext):
 
     await callback.message.answer(
         f"🧪 <b>ТЕСТОВАЯ ОПЛАТА УСПЕШНА!</b>\n\n"
-        f"📱 Устройства: {devices_text}\n"
-        f"📅 Срок: {period_name}\n"
-        f"🌍 Локаций: {len(config.ALL_INBOUNDS)}\n\n"
+        f"♾️ Устройства: без ограничений\n"
+        f"📅 Срок: {period_name}\n\n"
         f"Нажмите кнопку ниже, чтобы добавить подписку 👇",
         reply_markup=keyboard,
         parse_mode="HTML"
@@ -463,7 +407,7 @@ async def test_payment(callback: types.CallbackQuery, state: FSMContext):
     await state.clear()
 
 
-# ==================== ПРОВЕРКА ОПЛАТЫ ====================
+# ==================== ПРОВЕРКА ОПЛАТЫ (CryptoBot, ручная) ====================
 
 @router.callback_query(F.data.startswith("check_payment_"),
                        PurchaseState.waiting_payment)
@@ -493,11 +437,19 @@ async def check_payment(callback: types.CallbackQuery, state: FSMContext):
         await callback.answer("⏳ Оплата ещё не подтверждена. Попробуйте через 10-20 секунд.", show_alert=True)
         return
 
+    # Платёж уже мог быть обработан вебхуком cryptobot_webhook (webhook_server.py) —
+    # если pending-записи больше нет, значит подписка уже выдана, повторно не создаём.
+    payment_info = await db.get_pending_payment(invoice_id)
+    if not payment_info:
+        await callback.answer("✅ Оплата уже подтверждена, подписка выдана!", show_alert=True)
+        await state.clear()
+        return
+
     data = await state.get_data()
-    devices = data["devices"]
+    devices = data.get("devices", 0)
     period = data["period"]
 
-    client_email = f"user_{uuid.uuid4().hex[:10]}"
+    client_email = generate_client_email()
     expiry_time = int(time.time() * 1000) + (period * 24 * 60 * 60 * 1000)
 
     await callback.message.answer("⏳ Создаю подключение...")
@@ -540,7 +492,6 @@ async def check_payment(callback: types.CallbackQuery, state: FSMContext):
         return
 
     period_name = config.PERIOD_NAMES.get(period, f"{period} дней")
-    devices_text = pluralize_devices(devices)
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📱 Подключить устройство", url=sub_link)],
@@ -550,9 +501,8 @@ async def check_payment(callback: types.CallbackQuery, state: FSMContext):
 
     await callback.message.answer(
         f"✅ <b>Оплата подтверждена!</b>\n\n"
-        f"📱 Устройства: {devices_text}\n"
-        f"📅 Срок: {period_name}\n"
-        f"🌍 Локаций: {len(config.ALL_INBOUNDS)}\n\n"
+        f"♾️ Устройства: без ограничений\n"
+        f"📅 Срок: {period_name}\n\n"
         f"Нажмите кнопку ниже, чтобы добавить подписку 👇",
         reply_markup=keyboard,
         parse_mode="HTML"

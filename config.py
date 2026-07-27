@@ -9,6 +9,10 @@ load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_IDS = {int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()}
 
+# Обязательная подписка на канал — без неё бот не выполняет действия пользователя
+REQUIRED_CHANNEL_USERNAME = os.getenv("REQUIRED_CHANNEL_USERNAME", "@CerberusVPN")
+REQUIRED_CHANNEL_URL = os.getenv("REQUIRED_CHANNEL_URL", "https://t.me/CerberusVPN")
+
 # 3X-UI Panel
 PANEL_URL = os.getenv("PANEL_URL", "https://cerberusvless.top:19844/KsSNaHIplNjDaiy1Xs")
 API_TOKEN = os.getenv("API_TOKEN")
@@ -63,26 +67,14 @@ CRYPTOBOT_WEBHOOK_SECRET = os.getenv("CRYPTOBOT_WEBHOOK_SECRET", "")
 # Курс USDT к RUB (для конвертации)
 USDT_TO_RUB_RATE = float(os.getenv("USDT_TO_RUB_RATE", "95.0"))
 
-# Тарифы: устройства × периоды = цена в рублях
+# Тариф: единый, с безлимитным количеством одновременных подключений
+# (0 = без ограничений для панели). Раньше цена зависела от числа устройств —
+# больше не зависит.
 TARIFF_PRICES = {
-    3: {
-        30: 79,
-        90: 239,
-        180: 449,
-        365: 849,
-    },
-    5: {
-        30: 99,
-        90: 259,
-        180: 469,
-        365: 869,
-    },
-    10: {
-        30: 199,
-        90: 459,
-        180: 869,
-        365: 1669,
-    },
+    30: 79,
+    90: 239,
+    180: 449,
+    365: 849,
 }
 
 SUBSCRIPTION_PERIODS = [30, 90, 180, 365]
@@ -101,9 +93,7 @@ PERIOD_EMOJIS = {
     365: "🎉",
 }
 
-# Все локации
+# Сейчас работает только одна локация — Нидерланды
 ALL_INBOUNDS = [
-    {"id": INBOUND_LATVIA, "name": "🇱🇻 Латвия", "host": "lv.cerberusvless.top"},
     {"id": INBOUND_NETHERLANDS, "name": "🇳🇱 Нидерланды", "host": "nl.cerberusvless.top"},
-    {"id": INBOUND_FINLAND, "name": "🇫🇮 Финляндия", "host": "fi.cerberusvless.top"},
 ]

@@ -1,21 +1,49 @@
 # bot.py
 from aiogram import Bot, Dispatcher
 from aiogram.types import BotCommand
+from aiogram.client.session.middlewares.base import BaseRequestMiddleware
 import asyncio
 import logging
 import signal
 import uvicorn
 import config
 from database import db
-from handlers import purchase, main_menu
+from handlers import purchase, main_menu, admin
 from webhook_server import app as webhook_app
 from notifications import notifications_loop
+from emojis import wrap_custom_emoji, style_and_iconify_button
+from subscription_gate import ChannelSubscriptionMiddleware, router as subscription_gate_router
 
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+
+class CustomEmojiMiddleware(BaseRequestMiddleware):
+    """
+    Автоматически подменяет обычные эмодзи на кастомные Premium-эмодзи
+    (см. emojis.py) во всех исходящих запросах к Telegram, где задан
+    parse_mode="HTML" — без необходимости трогать каждый вызов
+    message.answer(...) по всему коду вручную.
+    """
+
+    async def __call__(self, make_request, bot, method):
+        if getattr(method, "parse_mode", None) == "HTML":
+            for field_name in ("text", "caption"):
+                value = getattr(method, field_name, None)
+                if value:
+                    setattr(method, field_name, wrap_custom_emoji(value))
+
+        reply_markup = getattr(method, "reply_markup", None)
+        inline_keyboard = getattr(reply_markup, "inline_keyboard", None)
+        if inline_keyboard:
+            for row in inline_keyboard:
+                for button in row:
+                    style_and_iconify_button(button)
+
+        return await make_request(bot, method)
 
 
 async def set_commands(bot: Bot):
@@ -34,11 +62,19 @@ async def main():
     print("✅ База данных инициализирована")
 
     bot = Bot(token=config.BOT_TOKEN)
+    bot.session.middleware(CustomEmojiMiddleware())
     dp = Dispatcher()
 
+    dp.include_router(subscription_gate_router)
     dp.include_router(main_menu.router)
     dp.include_router(purchase.router)
+    dp.include_router(admin.router)
     print("✅ Роутеры подключены")
+
+    gate_middleware = ChannelSubscriptionMiddleware()
+    dp.message.outer_middleware(gate_middleware)
+    dp.callback_query.outer_middleware(gate_middleware)
+    print("✅ Гейт обязательной подписки на канал подключен")
 
     await set_commands(bot)
     print("✅ Команды установлены")
